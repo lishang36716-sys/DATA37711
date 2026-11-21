@@ -1,0 +1,133 @@
+import itertools
+from pathlib import Path
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split, ParameterGrid
+from sklearn.metrics import mean_squared_error
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
+
+wine_path = Path("winequality-white.csv")
+if not wine_path.exists():
+    import urllib.request
+    links = [
+        "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-white.csv",
+        "https://raw.githubusercontent.com/WangLaoShi/Datasets/main/UCI-Wine-Quality-Data-Set/winequality-white.csv",
+    ]
+    for link in links:
+        try:
+            urllib.request.urlretrieve(link, wine_path)
+            print("Retrieved wine data from:", link)
+            break
+        except Exception as exc:
+            print("Download attempt failed:", type(exc).__name__)
+
+wine_available = wine_path.exists()
+if wine_available:
+    wine = pd.read_csv(wine_path, sep=";")
+    X = wine.drop(columns="quality")
+    y = wine["quality"]
+    X_trainval, X_test, y_trainval, y_test = train_test_split(
+        X, y, test_size=0.20, random_state=42
+    )
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_trainval, y_trainval, test_size=0.125, random_state=42
+    )
+    print("Train / validation / test:", len(y_train), len(y_val), len(y_test))
+else:
+    print("The wine file is not available. Place winequality-white.csv beside this notebook, then rerun this cell.")
+
+
+knn_grid = list(ParameterGrid({
+    "preprocess": ["passthrough", StandardScaler()],
+    "model__n_neighbors": list(range(1, 43)),
+    "model__weights": ["uniform", "distance"],
+    "model__p": [1, 2, 3],
+}))
+
+
+rf_grid = list(ParameterGrid({
+    "n_estimators": [10, 20],
+    "max_depth": [4, 6, 8, 12, None],
+    "min_samples_leaf": [1, 3, 6],
+    "max_features": [0.5, 1.0],
+    "min_samples_split": [2, 6, 12],
+    "max_samples": [0.65, 0.85, 1.0],
+}))
+print("Candidates: KNN", len(knn_grid), "; forest", len(rf_grid))
+
+def fit_and_select(builder, grid):
+    best_model, best_params, best_val = None, None, float("inf")
+    for params in grid:
+        estimator = builder()
+        estimator.set_params(**params)
+        estimator.fit(X_train, y_train)
+        score = mean_squared_error(y_val, estimator.predict(X_val))
+        if score < best_val:
+            best_val, best_model, best_params = score, estimator, params
+    test_mse = mean_squared_error(y_test, best_model.predict(X_test))
+    return best_params, best_val, test_mse
+
+if wine_available:
+    assert len(knn_grid) > len(y_val) and len(rf_grid) > len(y_val)
+    knn_params, knn_val, knn_test = fit_and_select(
+        lambda: Pipeline([("preprocess", "passthrough"), ("model", KNeighborsRegressor(n_jobs=-1))]),
+        knn_grid,
+    )
+    rf_params, rf_val, rf_test = fit_and_select(
+        lambda: RandomForestRegressor(random_state=42, n_jobs=-1),
+        rf_grid,
+    )
+    print("KNN best parameters:", knn_params)
+    print("Random forest best parameters:", rf_params)
+    print(pd.DataFrame([
+        {"Model": "KNN", "Validation MSE": knn_val, "Test MSE": knn_test},
+        {"Model": "Random forest", "Validation MSE": rf_val, "Test MSE": rf_test},
+    ]).round(4).to_string(index=False))
+    print("Validation minus test MSE:", round(knn_val-knn_test,4), round(rf_val-rf_test,4))
+else:
+    print("Wine dataset missing: the numerical results cannot be calculated here.")
+
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import log_loss
+
+counts = [1, 10, 100, 300, 1000]
+boost_results = {}
+for file in ["dset0-1.csv", "dset1-1.csv"]:
+    df = pd.read_csv(file, header=None)
+    X, y = df.iloc[:, 1:], df.iloc[:, 0].astype(int)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.30, random_state=42, stratify=y
+    )
+    rows = []
+    for count in counts:
+        model = GradientBoostingClassifier(n_estimators=count, random_state=42)
+        model.fit(X_train, y_train)
+        rows.append({
+            "Trees": count,
+            "Train error": 1 - model.score(X_train, y_train),
+            "Test error": 1 - model.score(X_test, y_test),
+            "Train log loss": log_loss(y_train, model.predict_proba(X_train)),
+            "Test log loss": log_loss(y_test, model.predict_proba(X_test)),
+        })
+    result = pd.DataFrame(rows)
+    boost_results[file] = result
+    print("\n"+file)
+    print(result.round(4).to_string(index=False))
+    fig, ax = plt.subplots(figsize=(7, 3.8))
+    ax.plot(counts, result["Train log loss"], "o-", label="Training")
+    ax.plot(counts, result["Test log loss"], "s-", label="Test")
+    ax.set_xscale("symlog", linthresh=1)
+    ax.set_xticks(counts, [str(c) for c in counts])
+    ax.set_xlabel("Number of trees")
+    ax.set_ylabel("Log loss")
+    ax.set_title(file + ": generalization")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.2)
+    plt.show()
